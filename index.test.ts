@@ -104,6 +104,7 @@ interface ToolResult {
 }
 
 interface RegisteredTool {
+  renderShell?: "default" | "self";
   prepareArguments?: (args: unknown) => ToolParams;
   description: string;
   promptGuidelines?: readonly string[];
@@ -478,6 +479,9 @@ describe("completion messages", () => {
 });
 
 describe("background tasks extension", () => {
+  test("uses an unboxed transcript shell", () => {
+    expect(createHarness().registeredTool?.renderShell).toBe("self");
+  });
   test("teaches the model how start commands execute", async () => {
     const harness = createHarness();
     const tool = harness.registeredTool;

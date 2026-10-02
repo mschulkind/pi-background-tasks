@@ -1,5 +1,7 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import type { Theme } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
+
+beforeAll(() => initTheme("dark"));
 import {
   KeybindingsManager,
   stripTerminalSequences,
@@ -671,6 +673,49 @@ describe("background task dashboard", () => {
 });
 
 describe("background task transcript rendering", () => {
+  test("collapses a started task to one row and reserves metadata for expansion", () => {
+    const selected = task();
+    const result = { content: [{ type: "text", text: "started" }], details: { task: selected } };
+    const component = renderBackgroundTaskResult(result, { expanded: false, isPartial: false }, theme,
+      { args: { action: "start" }, isError: false });
+    const lines = component.render(200);
+    const text = stripTerminalSequences(lines.join("\n"));
+    expect(lines).toHaveLength(1);
+    expect(text).toContain("Running");
+    expect(text).toContain(selected.id);
+    expect(text).not.toContain("PID");
+    expect(text).not.toContain("cwd");
+    expect(text).not.toContain("show command");
+    const expanded = stripTerminalSequences(renderBackgroundTaskResult(result,
+      { expanded: true, isPartial: false }, theme, { args: { action: "start" }, isError: false }).render(200).join("\n"));
+    expect(expanded).toContain(selected.command);
+    expect(expanded).toContain(selected.logPath);
+    expect(expanded).toContain("PID 1234");
+  });
+
+  test("collapsed completions use one unboxed row per task, preserving failures and omitted counts", () => {
+    const message = { content: "hidden", details: { omitted: 2, tasks: [
+      { id: "abc12345", name: "Build", status: "completed" as const, exitCode: 0, output: "long output" },
+      { id: "failed01", name: "Tests", status: "failed" as const, exitCode: 1, error: "broken test", output: "failure output" },
+    ] } };
+    const component = renderCompletionMessage(message, { expanded: false, outputPad: 0 }, theme);
+    const lines = component.render(200);
+    const text = stripTerminalSequences(lines.join("\n"));
+    expect(lines).toHaveLength(3);
+    expect(lines.join("\n")).not.toContain("\u001b[48;");
+    expect(text).toContain("Build");
+    expect(text).toContain("broken test");
+    expect(text).toContain("exit 1");
+    expect(text).toContain("2 additional tasks");
+    expect(text).not.toContain("1 task failed");
+    expect(text).not.toContain("show output tails");
+    expect(text).not.toContain("long output");
+    const expanded = stripTerminalSequences(renderCompletionMessage(message,
+      { expanded: true, outputPad: 0 }, theme).render(200).join("\n"));
+    expect(expanded).toContain("long output");
+    expect(expanded).toContain("failure output");
+  });
+
   test("renders incremental cursor calls and ranges", () => {
     const selected = task({ status: "completed" });
     const call = renderBackgroundTaskCall(

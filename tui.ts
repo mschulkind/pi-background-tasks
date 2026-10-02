@@ -4,7 +4,6 @@ import {
   type ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
 import {
-  Box,
   type Component,
   type KeybindingsManager,
   matchesKey,
@@ -575,7 +574,8 @@ export const renderBackgroundTaskResult = function renderBackgroundTaskResult(
 
   if (args.action === "stop") {
     return textResult(
-      `${styledStatus(task.status, theme)} · ${theme.fg("text", cleanInline(task.name))} · ${theme.fg("accent", task.id)}\n${theme.fg("dim", "Pi will send SIGKILL if the process does not stop after the grace period.")}`
+      `${styledStatus(task.status, theme)} · ${theme.fg("text", cleanInline(task.name))} · ${theme.fg("accent", task.id)}` +
+      (options.expanded ? `\n${theme.fg("dim", "Pi will send SIGKILL if the process does not stop after the grace period.")}` : "")
     );
   }
 
@@ -590,9 +590,8 @@ export const renderBackgroundTaskResult = function renderBackgroundTaskResult(
       ? undefined
       : `timeout ${formatUiDuration(task.timeoutSeconds * 1000)}`,
   ].filter((value): value is string => value !== undefined);
-  lines.push(theme.fg("dim", metadata.join(" · ")));
-  if (!options.expanded) {
-    lines.push(theme.fg("dim", keyHint("app.tools.expand", "show command and log path")));
+  if (options.expanded) {
+    lines.push(theme.fg("dim", metadata.join(" · ")));
   }
   return textResult(lines.join("\n"));
 };
@@ -629,9 +628,9 @@ export const renderCompletionMessage = function renderCompletionMessage(
   }
 
   const summary = completionSummary(details.tasks);
-  const lines = [
+  const lines = options.expanded ? [
     theme.fg(summary.color, theme.bold(summary.text)),
-  ];
+  ] : [];
   const visibleTasks = options.expanded
     ? details.tasks
     : details.tasks.slice(0, COLLAPSED_TASK_ROWS);
@@ -645,10 +644,11 @@ export const renderCompletionMessage = function renderCompletionMessage(
         : task.signal
           ? ` · ${task.signal}`
           : "";
+    const error = !options.expanded && task.error ? ` · ${theme.fg("error", cleanInline(task.error))}` : "";
     lines.push(
-      `${theme.fg(presentation.color, `${presentation.symbol} ${presentation.label}`)} · ${theme.fg("text", cleanInline(task.name))} · ${theme.fg("accent", task.id)}${theme.fg("dim", terminal)}`
+      `${theme.fg(presentation.color, `${presentation.symbol} ${presentation.label}`)} · ${theme.fg("text", cleanInline(task.name))} · ${theme.fg("accent", task.id)}${theme.fg("dim", terminal)}${error}`
     );
-    if (task.error) {
+    if (options.expanded && task.error) {
       lines.push(`  ${theme.fg("error", cleanInline(task.error))}`);
     }
     if (
@@ -686,20 +686,7 @@ export const renderCompletionMessage = function renderCompletionMessage(
       )
     );
   }
-  if (
-    !options.expanded &&
-    details.tasks.some((task) => task.output !== undefined)
-  ) {
-    lines.push(theme.fg("dim", keyHint("app.tools.expand", "show output tails")));
-  }
-
-  const box = new Box(
-    options.outputPad,
-    0,
-    (text: string) => theme.bg("customMessageBg", text)
-  );
-  box.addChild(new Text(lines.join("\n"), 0, 0));
-  return box;
+  return new Text(lines.join("\n"), options.outputPad, 0);
 };
 
 interface StatusWidgetManager {

@@ -1564,6 +1564,7 @@ const backgroundTasksExtension = function backgroundTasksExtension(
       }
     },
     label: "Background Task",
+    renderShell: "self",
     name: TOOL_NAME,
     parameters: Parameters,
     prepareArguments: prepareBackgroundTaskArguments,
