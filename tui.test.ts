@@ -16,6 +16,8 @@ import type {
   TaskWatchSnapshot,
 } from "./core.ts";
 import {
+  getBackgroundTaskHints,
+  getCompletionHints,
   renderBackgroundTaskCall,
   renderBackgroundTaskResult,
   renderCompletionMessage,
@@ -673,19 +675,19 @@ describe("background task dashboard", () => {
 });
 
 describe("background task transcript rendering", () => {
-  test("collapses a started task to one row and reserves metadata for expansion", () => {
+  test("keeps original process metadata and expanded command detail", () => {
     const selected = task();
     const result = { content: [{ type: "text", text: "started" }], details: { task: selected } };
     const component = renderBackgroundTaskResult(result, { expanded: false, isPartial: false }, theme,
       { args: { action: "start" }, isError: false });
     const lines = component.render(200);
     const text = stripTerminalSequences(lines.join("\n"));
-    expect(lines).toHaveLength(1);
+    expect(lines.length).toBeGreaterThan(1);
     expect(text).toContain("Running");
     expect(text).toContain(selected.id);
-    expect(text).not.toContain("PID");
-    expect(text).not.toContain("cwd");
-    expect(text).not.toContain("show command");
+    expect(text).toContain("PID");
+    expect(text).toContain("cwd");
+    expect(text).toContain("show command");
     const expanded = stripTerminalSequences(renderBackgroundTaskResult(result,
       { expanded: true, isPartial: false }, theme, { args: { action: "start" }, isError: false }).render(200).join("\n"));
     expect(expanded).toContain(selected.command);
@@ -693,7 +695,7 @@ describe("background task transcript rendering", () => {
     expect(expanded).toContain("PID 1234");
   });
 
-  test("collapsed completions use one unboxed row per task, preserving failures and omitted counts", () => {
+  test("original completion detail preserves failures, output expansion and omitted counts", () => {
     const message = { content: "hidden", details: { omitted: 2, tasks: [
       { id: "abc12345", name: "Build", status: "completed" as const, exitCode: 0, output: "long output" },
       { id: "failed01", name: "Tests", status: "failed" as const, exitCode: 1, error: "broken test", output: "failure output" },
@@ -701,14 +703,14 @@ describe("background task transcript rendering", () => {
     const component = renderCompletionMessage(message, { expanded: false, outputPad: 0 }, theme);
     const lines = component.render(200);
     const text = stripTerminalSequences(lines.join("\n"));
-    expect(lines).toHaveLength(3);
+    expect(lines.length).toBeGreaterThan(3);
     expect(lines.join("\n")).not.toContain("\u001b[48;");
     expect(text).toContain("Build");
     expect(text).toContain("broken test");
     expect(text).toContain("exit 1");
     expect(text).toContain("2 additional tasks");
-    expect(text).not.toContain("1 task failed");
-    expect(text).not.toContain("show output tails");
+    expect(text).toContain("1 task failed");
+    expect(text).toContain("show output tails");
     expect(text).not.toContain("long output");
     const expanded = stripTerminalSequences(renderCompletionMessage(message,
       { expanded: true, outputPad: 0 }, theme).render(200).join("\n"));
@@ -868,5 +870,32 @@ describe("background task transcript rendering", () => {
     expect(completionText).toContain("1 task completed");
     expect(completionText).toContain("all tests passed");
     expect(completionText).not.toContain("model-facing XML");
+  });
+});
+
+
+describe("compact transcript hints", () => {
+  test("retains status, log path, byte counts and warnings without raw output", () => {
+    const selected = task({ status: "failed", error: "timeout", exitCode: 1 });
+    const hints = getBackgroundTaskHints({ args: { action: "logs" }, isError: false, isPartial: false, executionStarted: true,
+      result: { content: [{ type: "text", text: "SECRET OUTPUT" }], details: { task: selected, totalBytes: 99, bytesRead: 10, truncated: true } } });
+    expect(hints.status).toBe("error");
+    expect(hints.error).toContain("timeout");
+    expect(hints.outputPaths).toEqual([selected.logPath]);
+    expect(hints.counts).toContainEqual({ label: "bytes", value: 99 });
+    expect(hints.summary).toContain("truncated");
+    expect(JSON.stringify(hints)).not.toContain("SECRET OUTPUT");
+  });
+  test("retains aggregate failures, omitted tasks and unavailable output", () => {
+    const hints = getCompletionHints({ content: "SECRET", details: { omitted: 2, tasks: [
+      { id: "one", name: "Build", status: "completed", exitCode: 0 },
+      { id: "two", name: "Tests", status: "failed", exitCode: 7, error: "broken", outputError: "unreadable", outputTruncated: true },
+    ] } });
+    expect(hints.status).toBe("error");
+    expect(hints.error).toContain("broken");
+    expect(hints.summary).toContain("exit 7");
+    expect(hints.summary).toContain("output unavailable");
+    expect(hints.counts).toContainEqual({ label: "omitted", value: 2 });
+    expect(JSON.stringify(hints)).not.toContain("SECRET");
   });
 });

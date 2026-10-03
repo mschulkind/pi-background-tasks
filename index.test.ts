@@ -148,6 +148,7 @@ const createEventBus = function createEventBus(): TestEventBus {
 };
 
 interface HarnessOptions {
+  messageHints?: Map<string, (message: { content: unknown; details?: import("./tui.ts").CompletionDisplayDetails }) => unknown>;
   events?: TestEventBus;
   hasUI?: boolean;
   mode?: "tui" | "rpc" | "json" | "print";
@@ -181,6 +182,11 @@ const createHarness = function createHarness(options: HarnessOptions = {}) {
 
   const events = options.events ?? createEventBus();
   const pi = {
+    ...(options.messageHints ? {
+      registerMessageHints(type: string, provider: (message: { content: unknown; details?: import("./tui.ts").CompletionDisplayDetails }) => unknown) {
+        options.messageHints!.set(type, provider);
+      },
+    } : {}),
     events,
     on(event: string, handler: EventHandler) {
       const registered = handlers.get(event) ?? [];
@@ -346,6 +352,40 @@ const waitForNotificationCount = async function waitForNotificationCount(
   throw new Error(`Expected ${String(expected)} completion notifications`);
 };
 
+/** Control only the extension's wake timer; shell execution and I/O stay real.
+ * Like the manager overrides below, this scoped replacement is restored in finally.
+ */
+const controlWakeTimer = function controlWakeTimer() {
+  const originalSetTimeout = globalThis.setTimeout;
+  const pending: { fire: () => void; handle: NodeJS.Timeout }[] = [];
+  globalThis.setTimeout = ((
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+    ...args: unknown[]
+  ) => {
+    if (callback.name !== "flushWake" || delay !== 100) {
+      return originalSetTimeout(callback, delay, ...args);
+    }
+    // Use a genuine, canceled handle so unref/clearTimeout retain their API.
+    const handle = originalSetTimeout(() => {}, 0);
+    clearTimeout(handle);
+    pending.push({ fire: () => callback(...args), handle });
+    return handle;
+  }) as typeof setTimeout;
+  return {
+    flush() {
+      expect(pending).toHaveLength(1);
+      pending.shift()!.fire();
+    },
+    restore() {
+      globalThis.setTimeout = originalSetTimeout;
+      for (const { handle } of pending.splice(0)) {
+        clearTimeout(handle);
+      }
+    },
+  };
+};
+
 const fakeCompletion = function fakeCompletion(
   index: number,
   overrides: Partial<TaskCompletion> = {}
@@ -479,8 +519,14 @@ describe("completion messages", () => {
 });
 
 describe("background tasks extension", () => {
-  test("uses an unboxed transcript shell", () => {
-    expect(createHarness().registeredTool?.renderShell).toBe("self");
+  test("leaves transcript shell ownership to core", () => {
+    expect(createHarness().registeredTool?.renderShell).toBeUndefined();
+  });
+  test("registers completion hints only when the public SDK method exists", () => {
+    const messageHints = new Map<string, (message: { content: unknown; details?: import("./tui.ts").CompletionDisplayDetails }) => unknown>();
+    createHarness({ messageHints });
+    expect(messageHints.get("background-task-completion")?.({ content: "raw", details: { tasks: [], omitted: 0 } })).toMatchObject({ label: "BG tasks", status: "completed" });
+    expect(createHarness().registeredTool).toBeDefined();
   });
   test("teaches the model how start commands execute", async () => {
     const harness = createHarness();
@@ -1111,48 +1157,113 @@ describe("background tasks extension", () => {
   });
 
   test("splits large completion batches with one turn request", async () => {
+    const clock = controlWakeTimer();
     const harness = createHarness();
-    await harness.emit("session_start");
-    const startWave = async (offset: number): Promise<void> => {
-      await Promise.all(
-        Array.from({ length: 16 }, async (_, index) => {
-          await harness.execute({
-            action: "start",
-            command: "true",
-            name: `Batch ${String(offset + index)}`,
-            completionPolicy: "wake",
-          });
-        })
+    try {
+      await harness.emit("session_start");
+      const startWave = async (offset: number): Promise<void> => {
+        await Promise.all(
+          Array.from({ length: 16 }, async (_, index) => {
+            await harness.execute({
+              action: "start",
+              command: "true",
+              name: `Batch ${String(offset + index)}`,
+              completionPolicy: "wake",
+            });
+          })
+        );
+      };
+
+      // The manager allows only 16 running tasks. Finish both waves while the
+      // wake timer is held so the real ledger contains 32 pending completions.
+      await startWave(0);
+      await waitForNotificationCount(harness.notifications, 16);
+      await startWave(16);
+      await waitForNotificationCount(harness.notifications, 32);
+      expect(harness.sentMessages).toHaveLength(0);
+      clock.flush();
+
+      expect(harness.sentMessages).toHaveLength(2);
+      expect(harness.sentMessages.map(({ options }) => options)).toEqual([
+        { deliverAs: "steer", triggerTurn: true },
+        { deliverAs: "steer", triggerTurn: false },
+      ]);
+      const messages = harness.sentMessages.map(({ message }) =>
+        message as {
+          details?: { deliveryIds?: string[]; omitted?: number };
+        }
       );
-    };
+      const deliveryIds = messages.flatMap(
+        (message) => message.details?.deliveryIds ?? []
+      );
+      expect(messages[0]?.details?.deliveryIds).toHaveLength(16);
+      expect(messages[1]?.details?.deliveryIds).toHaveLength(16);
+      expect(messages.every((message) => message.details?.omitted === 0)).toBe(
+        true
+      );
+      expect(new Set(deliveryIds).size).toBe(32);
 
-    await startWave(0);
-    await waitForNotificationCount(harness.notifications, 16);
-    await startWave(16);
-    await waitForNotificationCount(harness.notifications, 32);
-    await waitForMessageCount(harness.sentMessages, 2);
-
-    expect(harness.sentMessages).toHaveLength(2);
-    expect(harness.sentMessages.map(({ options }) => options)).toEqual([
-      { deliverAs: "steer", triggerTurn: true },
-      { deliverAs: "steer", triggerTurn: false },
-    ]);
-    const messages = harness.sentMessages.map(({ message }) =>
-      message as {
-        details?: { deliveryIds?: string[]; omitted?: number };
+      const context = (await harness.emit("context", { messages })) as {
+        messages: unknown[];
+      };
+      expect(context.messages).toEqual(messages);
+      expect(harness.sendAttempts).toBe(2);
+    } finally {
+      try {
+        await harness.emit("session_shutdown");
+      } finally {
+        clock.restore();
       }
-    );
-    const deliveryIds = messages.flatMap(
-      (message) => message.details?.deliveryIds ?? []
-    );
-    expect(messages[0]?.details?.deliveryIds).toHaveLength(16);
-    expect(messages[1]?.details?.deliveryIds).toHaveLength(16);
-    expect(messages.every((message) => message.details?.omitted === 0)).toBe(
-      true
-    );
-    expect(new Set(deliveryIds).size).toBe(32);
+    }
+  });
 
-    await harness.emit("session_shutdown");
+  test("requests a fresh turn for a separate completion batch", async () => {
+    const clock = controlWakeTimer();
+    const harness = createHarness();
+    try {
+      await harness.emit("session_start");
+      for (let index = 0; index < 2; index += 1) {
+        // Complete and flush each batch before starting the next one. No
+        // context event is needed to reset the per-flush turn request.
+        // oxlint-disable-next-line eslint/no-await-in-loop
+        await harness.execute({
+          action: "start",
+          command: "true",
+          name: `Separate batch ${String(index)}`,
+          completionPolicy: "wake",
+        });
+        // oxlint-disable-next-line eslint/no-await-in-loop
+        await waitForNotificationCount(harness.notifications, index + 1);
+        expect(harness.sentMessages).toHaveLength(index);
+        clock.flush();
+        expect(harness.sentMessages).toHaveLength(index + 1);
+      }
+
+      expect(harness.sentMessages.map(({ options }) => options)).toEqual([
+        { deliverAs: "steer", triggerTurn: true },
+        { deliverAs: "steer", triggerTurn: true },
+      ]);
+      const messages = harness.sentMessages.map(({ message }) =>
+        message as { details: { deliveryIds: string[] } }
+      );
+      expect(
+        messages.map((message) => message.details.deliveryIds.length)
+      ).toEqual([1, 1]);
+      expect(
+        new Set(messages.flatMap((message) => message.details.deliveryIds)).size
+      ).toBe(2);
+      const context = (await harness.emit("context", { messages })) as {
+        messages: unknown[];
+      };
+      expect(context.messages).toEqual(messages);
+      expect(harness.sendAttempts).toBe(2);
+    } finally {
+      try {
+        await harness.emit("session_shutdown");
+      } finally {
+        clock.restore();
+      }
+    }
   });
 
   test("status and logs observe completion before its wake", async () => {

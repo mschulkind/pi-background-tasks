@@ -65,6 +65,68 @@ export interface BackgroundTaskToolDetails {
   watch?: TaskWatchSnapshot;
 }
 
+// Structural subset of CompactTranscriptHints so published older SDKs remain
+// loadable. Core validates and lays out these values; this module never does.
+interface BackgroundHints {
+  label: string;
+  status?: "info" | "warning" | "error" | "running" | "completed" | "cancelled";
+  error?: string;
+  summary?: string;
+  counts?: { label: string; value: number }[];
+  outputPaths?: string[];
+}
+
+export function getBackgroundTaskHints(input: {
+  args: BackgroundTaskToolParams;
+  result?: RenderableToolResult;
+  isError: boolean;
+  isPartial: boolean;
+  executionStarted: boolean;
+}): BackgroundHints {
+  const details = input.result?.details;
+  const task = details?.task;
+  const tasks = details?.tasks;
+  const failed = input.isError || task?.status === "failed" || tasks?.some((item) => item.status === "failed");
+  const warning = details?.truncated || Boolean(details?.droppedBytes);
+  const status = failed ? "error" : warning ? "warning" : input.isPartial || (!input.result && input.executionStarted) || task?.status === "running" || task?.status === "stopping" ? "running" : task?.status === "stopped" ? "cancelled" : input.result ? "completed" : "info";
+  const terminal = task?.exitCode != null ? `exit ${String(task.exitCode)}` : task?.signal ?? "";
+  const warnings = [details?.truncated ? "truncated" : "", details?.droppedBytes ? "skipped bytes" : ""].filter(Boolean).join("; ");
+  return {
+    label: "BG task",
+    status,
+    error: failed ? [terminal, task?.error ?? "Background task failed"].filter(Boolean).join("; ").slice(0, 160) : warning ? warnings : undefined,
+    summary: [input.args.action, task?.status, terminal, warnings, details?.watch ? `${details.watch.condition} watch ${details.watch.status}` : ""].filter(Boolean).join("; ").slice(0, 160),
+    counts: tasks ? [
+      { label: "active", value: tasks.filter((item) => item.status === "running" || item.status === "stopping").length },
+      { label: "failed", value: tasks.filter((item) => item.status === "failed").length },
+      { label: "tasks", value: tasks.length },
+    ] : details?.totalBytes !== undefined ? [
+      { label: "bytes", value: details.totalBytes },
+      { label: "read", value: details.bytesRead ?? 0 },
+      { label: "skipped", value: details.droppedBytes ?? 0 },
+    ] : undefined,
+    outputPaths: task?.logPath && task.logPath.length <= 256 ? [task.logPath] : undefined,
+  };
+}
+
+export function getCompletionHints(message: RenderableCompletionMessage): BackgroundHints {
+  const details = message.details;
+  if (!details) return { label: "BG tasks" };
+  const failed = details.tasks.filter((task) => task.status === "failed");
+  const completed = details.tasks.filter((task) => task.status === "completed").length;
+  const unavailable = details.tasks.some((task) => task.outputError && task.output === undefined);
+  const truncated = details.tasks.some((task) => task.outputTruncated);
+  const terminal = failed[0]?.exitCode != null ? `exit ${String(failed[0].exitCode)}` : failed[0]?.signal ?? "";
+  const warnings = [unavailable ? "output unavailable" : "", truncated ? "truncated" : ""].filter(Boolean).join("; ");
+  return {
+    label: "BG tasks",
+    status: failed.length ? "error" : unavailable || truncated || details.omitted ? "warning" : "completed",
+    error: failed.length ? [terminal, failed[0]?.error ?? "Task failed", warnings].filter(Boolean).join("; ").slice(0, 160) : unavailable || truncated ? warnings : details.omitted ? "Additional tasks omitted" : undefined,
+    summary: [terminal, warnings].filter(Boolean).join("; ").slice(0, 160),
+    counts: [{ label: "failed", value: failed.length }, { label: "done", value: completed }, { label: "omitted", value: details.omitted }],
+  };
+}
+
 interface TextContent {
   type: string;
   text?: string;
@@ -574,8 +636,7 @@ export const renderBackgroundTaskResult = function renderBackgroundTaskResult(
 
   if (args.action === "stop") {
     return textResult(
-      `${styledStatus(task.status, theme)} · ${theme.fg("text", cleanInline(task.name))} · ${theme.fg("accent", task.id)}` +
-      (options.expanded ? `\n${theme.fg("dim", "Pi will send SIGKILL if the process does not stop after the grace period.")}` : "")
+      `${styledStatus(task.status, theme)} · ${theme.fg("text", cleanInline(task.name))} · ${theme.fg("accent", task.id)}\n${theme.fg("dim", "Pi will send SIGKILL if the process does not stop after the grace period.")}`
     );
   }
 
@@ -590,8 +651,9 @@ export const renderBackgroundTaskResult = function renderBackgroundTaskResult(
       ? undefined
       : `timeout ${formatUiDuration(task.timeoutSeconds * 1000)}`,
   ].filter((value): value is string => value !== undefined);
-  if (options.expanded) {
-    lines.push(theme.fg("dim", metadata.join(" · ")));
+  lines.push(theme.fg("dim", metadata.join(" · ")));
+  if (!options.expanded) {
+    lines.push(theme.fg("dim", keyHint("app.tools.expand", "show command and log path")));
   }
   return textResult(lines.join("\n"));
 };
@@ -628,9 +690,9 @@ export const renderCompletionMessage = function renderCompletionMessage(
   }
 
   const summary = completionSummary(details.tasks);
-  const lines = options.expanded ? [
+  const lines = [
     theme.fg(summary.color, theme.bold(summary.text)),
-  ] : [];
+  ];
   const visibleTasks = options.expanded
     ? details.tasks
     : details.tasks.slice(0, COLLAPSED_TASK_ROWS);
@@ -644,11 +706,10 @@ export const renderCompletionMessage = function renderCompletionMessage(
         : task.signal
           ? ` · ${task.signal}`
           : "";
-    const error = !options.expanded && task.error ? ` · ${theme.fg("error", cleanInline(task.error))}` : "";
     lines.push(
-      `${theme.fg(presentation.color, `${presentation.symbol} ${presentation.label}`)} · ${theme.fg("text", cleanInline(task.name))} · ${theme.fg("accent", task.id)}${theme.fg("dim", terminal)}${error}`
+      `${theme.fg(presentation.color, `${presentation.symbol} ${presentation.label}`)} · ${theme.fg("text", cleanInline(task.name))} · ${theme.fg("accent", task.id)}${theme.fg("dim", terminal)}`
     );
-    if (options.expanded && task.error) {
+    if (task.error) {
       lines.push(`  ${theme.fg("error", cleanInline(task.error))}`);
     }
     if (
@@ -686,6 +747,13 @@ export const renderCompletionMessage = function renderCompletionMessage(
       )
     );
   }
+  if (
+    !options.expanded &&
+    details.tasks.some((task) => task.output !== undefined)
+  ) {
+    lines.push(theme.fg("dim", keyHint("app.tools.expand", "show output tails")));
+  }
+
   return new Text(lines.join("\n"), options.outputPad, 0);
 };
 

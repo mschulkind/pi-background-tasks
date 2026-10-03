@@ -1,9 +1,12 @@
 # Background tasks for Pi
 
 This fork is based on [Jawfish/pi-background-tasks](https://github.com/Jawfish/pi-background-tasks),
-with its MIT license retained. It keeps transcript calls and completion notices
-unboxed, shows one collapsed row per task, and reserves process metadata and
-output tails for expansion. Task execution and model-facing output are unchanged.
+with its MIT license retained. On Pi versions supporting compact transcript
+hints, core owns the collapsed layout; this fork supplies task status, counts,
+log paths, and failure or truncation metadata. Original detail renderers remain
+available through expansion or legacy mode. Older SDKs ignore hints and use
+those renderers. Task execution, journals, widgets, and model-facing output are
+unchanged.
 
 Run session-owned POSIX shell commands without blocking Pi. The extension gives
 the model task status before each model call. It can notify or continue the

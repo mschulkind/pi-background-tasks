@@ -5,6 +5,7 @@ import path from "node:path";
 import type {
   ExtensionAPI,
   ExtensionContext,
+  ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { Static } from "typebox";
@@ -30,6 +31,8 @@ import { resolveJournalPath, TaskJournal } from "./journal.ts";
 import type { DeliveryNotifyResult } from "./journal.ts";
 import {
   formatUiDuration,
+  getBackgroundTaskHints,
+  getCompletionHints,
   renderBackgroundTaskCall,
   renderBackgroundTaskResult,
   renderCompletionMessage,
@@ -1409,7 +1412,15 @@ const backgroundTasksExtension = function backgroundTasksExtension(
       renderCompletionMessage(message, options, theme)
   );
 
-  pi.registerTool<typeof Parameters, BackgroundTaskToolDetails>({
+  // Optional structural public API: older SDKs still use the original renderer.
+  const hintApi = pi as ExtensionAPI & {
+    registerMessageHints?: (type: string, provider: typeof getCompletionHints) => void;
+  };
+  hintApi.registerMessageHints?.("background-task-completion", getCompletionHints);
+
+  const backgroundTool: ToolDefinition<typeof Parameters, BackgroundTaskToolDetails> & {
+    getCompactHints: typeof getBackgroundTaskHints;
+  } = {
     description: [
       "Manage session-scoped background shell tasks.",
       "Actions: start, status, logs, stop, watch, unwatch.",
@@ -1564,7 +1575,7 @@ const backgroundTasksExtension = function backgroundTasksExtension(
       }
     },
     label: "Background Task",
-    renderShell: "self",
+    getCompactHints: getBackgroundTaskHints,
     name: TOOL_NAME,
     parameters: Parameters,
     prepareArguments: prepareBackgroundTaskArguments,
@@ -1585,7 +1596,8 @@ const backgroundTasksExtension = function backgroundTasksExtension(
     ],
     promptSnippet:
       "Start, inspect, read, or stop session-scoped background shell tasks",
-  });
+  };
+  pi.registerTool(backgroundTool);
 
   pi.registerCommand("background-tasks", {
     description: "Open the interactive background task monitor",
